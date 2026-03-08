@@ -3,6 +3,20 @@
  * OpenMP Image Convolution (Shared Memory Parallelism)
  * EC7207 - High Performance Computing
  * =============================================================================
+ *
+ * Description:
+ *   Performs 2D convolution on a grayscale PGM image using OpenMP.
+ *   Image rows are distributed among threads for parallel computation.
+ *   Results are compared against the serial baseline using RMSE.
+ *
+ * Compilation:
+ *   gcc -O2 -fopenmp -o openmp_conv openmp_convolution.c -lm
+ *
+ * Usage:
+ *   ./openmp_conv <input.pgm> <output.pgm> [num_threads]
+ *   ./openmp_conv --generate <width> <height> <output.pgm> [num_threads]
+ *
+ * =============================================================================
  */
 
 #include <stdio.h>
@@ -17,10 +31,23 @@
 #define KERNEL_RADIUS (KERNEL_SIZE / 2)
 #define DEFAULT_NUM_THREADS 4
 
+/* Gaussian Blur 3x3 Kernel */
 static float gaussian_kernel[KERNEL_SIZE][KERNEL_SIZE] = {
     {1.0f, 2.0f, 1.0f},
     {2.0f, 4.0f, 2.0f},
     {1.0f, 2.0f, 1.0f}};
+
+/* Sharpen 3x3 Kernel */
+static float sharpen_kernel[KERNEL_SIZE][KERNEL_SIZE] = {
+    {0.0f, -1.0f, 0.0f},
+    {-1.0f, 5.0f, -1.0f},
+    {0.0f, -1.0f, 0.0f}};
+
+/* Edge Detection (Laplacian) 3x3 Kernel */
+static float edge_kernel[KERNEL_SIZE][KERNEL_SIZE] = {
+    {-1.0f, -1.0f, -1.0f},
+    {-1.0f, 8.0f, -1.0f},
+    {-1.0f, -1.0f, -1.0f}};
 
 /* ========================= PGM Image I/O ========================= */
 
@@ -118,14 +145,12 @@ unsigned char *generate_test_image(int width, int height)
             {
                 val = 200;
             }
-
             int ci = height / 2, cj = width / 2;
             int radius = height < width ? height / 6 : width / 6;
             if ((i - ci) * (i - ci) + (j - cj) * (j - cj) < radius * radius)
             {
                 val = 50;
             }
-
             data[i * width + j] = (unsigned char)(val > 255 ? 255 : (val < 0 ? 0 : val));
         }
     }
@@ -153,8 +178,12 @@ void normalize_kernel(float kernel[KERNEL_SIZE][KERNEL_SIZE])
 
 /* ========================= Convolution ========================= */
 
+/**
+ * Serial convolution (for baseline comparison within this program).
+ */
 void convolve_serial(const unsigned char *input, unsigned char *output,
-                     int width, int height, float kernel[KERNEL_SIZE][KERNEL_SIZE])
+                     int width, int height,
+                     float kernel[KERNEL_SIZE][KERNEL_SIZE])
 {
     for (int row = 0; row < height; row++)
     {
@@ -167,7 +196,6 @@ void convolve_serial(const unsigned char *input, unsigned char *output,
                 {
                     int ni = row + ki;
                     int nj = col + kj;
-
                     if (ni >= 0 && ni < height && nj >= 0 && nj < width)
                     {
                         sum += input[ni * width + nj] *
@@ -175,7 +203,6 @@ void convolve_serial(const unsigned char *input, unsigned char *output,
                     }
                 }
             }
-
             if (sum < 0.0f)
                 sum = 0.0f;
             if (sum > 255.0f)
@@ -185,6 +212,12 @@ void convolve_serial(const unsigned char *input, unsigned char *output,
     }
 }
 
+/**
+ * OpenMP parallel convolution.
+ * Parallelizes the outer loop (rows) across threads.
+ * Each thread processes a contiguous set of rows independently.
+ * No synchronization needed since each output pixel depends only on input pixels.
+ */
 void convolve_openmp(const unsigned char *input, unsigned char *output,
                      int width, int height,
                      float kernel[KERNEL_SIZE][KERNEL_SIZE],
@@ -199,6 +232,7 @@ void convolve_openmp(const unsigned char *input, unsigned char *output,
         {
             float sum = 0.0f;
 
+            /* Apply kernel centered at (row, col) */
             for (int ki = -KERNEL_RADIUS; ki <= KERNEL_RADIUS; ki++)
             {
                 for (int kj = -KERNEL_RADIUS; kj <= KERNEL_RADIUS; kj++)
@@ -206,6 +240,7 @@ void convolve_openmp(const unsigned char *input, unsigned char *output,
                     int ni = row + ki;
                     int nj = col + kj;
 
+                    /* Zero-padding boundary check */
                     if (ni >= 0 && ni < height && nj >= 0 && nj < width)
                     {
                         sum += input[ni * width + nj] *
@@ -214,6 +249,7 @@ void convolve_openmp(const unsigned char *input, unsigned char *output,
                 }
             }
 
+            /* Clamp result to [0, 255] */
             if (sum < 0.0f)
                 sum = 0.0f;
             if (sum > 255.0f)
@@ -221,6 +257,23 @@ void convolve_openmp(const unsigned char *input, unsigned char *output,
             output[row * width + col] = (unsigned char)(sum + 0.5f);
         }
     }
+}
+
+/* ========================= RMSE Calculation ========================= */
+
+double calculate_rmse(const unsigned char *img1, const unsigned char *img2,
+                      int width, int height)
+{
+    double sum_sq = 0.0;
+    int total_pixels = width * height;
+
+    for (int i = 0; i < total_pixels; i++)
+    {
+        double diff = (double)img1[i] - (double)img2[i];
+        sum_sq += diff * diff;
+    }
+
+    return sqrt(sum_sq / total_pixels);
 }
 
 /* ========================= Main Program ========================= */
@@ -247,8 +300,10 @@ int main(int argc, char *argv[])
     printf("  EC7207 - High Performance Computing\n");
     printf("============================================\n\n");
 
+    /* Parse command-line arguments */
     if (argc >= 3 && strcmp(argv[1], "--generate") != 0)
     {
+        /* Read from file */
         input_image = read_pgm(argv[1], &width, &height, &maxval);
         if (!input_image)
             return EXIT_FAILURE;
@@ -258,6 +313,7 @@ int main(int argc, char *argv[])
     }
     else if (argc >= 5 && strcmp(argv[1], "--generate") == 0)
     {
+        /* Generate test image */
         width = atoi(argv[2]);
         height = atoi(argv[3]);
         if (width <= 0 || height <= 0)
@@ -265,11 +321,9 @@ int main(int argc, char *argv[])
             fprintf(stderr, "Error: Invalid dimensions %d x %d\n", width, height);
             return EXIT_FAILURE;
         }
-
         input_image = generate_test_image(width, height);
         if (!input_image)
             return EXIT_FAILURE;
-
         output_filename = argv[4];
         if (argc >= 6)
             num_threads = atoi(argv[5]);
@@ -283,6 +337,7 @@ int main(int argc, char *argv[])
     if (num_threads < 1)
         num_threads = 1;
 
+    /* Allocate output images */
     int img_size = width * height;
     output_serial = (unsigned char *)malloc(img_size * sizeof(unsigned char));
     output_openmp = (unsigned char *)malloc(img_size * sizeof(unsigned char));
@@ -290,20 +345,77 @@ int main(int argc, char *argv[])
     {
         fprintf(stderr, "Error: Memory allocation failed\n");
         free(input_image);
-        free(output_openmp);
         free(output_serial);
+        free(output_openmp);
         return EXIT_FAILURE;
     }
 
+    /* Normalize kernel */
     normalize_kernel(gaussian_kernel);
+
+    printf("\n[CONFIG] Image size    : %d x %d (%d pixels)\n", width, height, img_size);
+    printf("[CONFIG] Kernel size   : %d x %d\n", KERNEL_SIZE, KERNEL_SIZE);
+    printf("[CONFIG] Kernel type   : Gaussian Blur\n");
+    printf("[CONFIG] Threads       : %d\n", num_threads);
+    printf("[CONFIG] Max threads   : %d\n", omp_get_max_threads());
+    printf("[CONFIG] Boundary      : Zero-padding\n\n");
+
+    /* =========== Serial Baseline =========== */
+    printf("[STATUS] Running serial baseline...\n");
+    double serial_start = omp_get_wtime();
     convolve_serial(input_image, output_serial, width, height, gaussian_kernel);
+    double serial_end = omp_get_wtime();
+    double serial_time = serial_end - serial_start;
+    printf("[STATUS] Serial complete: %.6f seconds\n\n", serial_time);
+
+    /* =========== OpenMP Parallel =========== */
+    printf("[STATUS] Running OpenMP convolution with %d threads...\n", num_threads);
+    double omp_start = omp_get_wtime();
     convolve_openmp(input_image, output_openmp, width, height, gaussian_kernel, num_threads);
+    double omp_end = omp_get_wtime();
+    double omp_time = omp_end - omp_start;
+    printf("[STATUS] OpenMP complete: %.6f seconds\n\n", omp_time);
+
+    /* =========== Performance Analysis =========== */
+    double speedup = serial_time / omp_time;
+    double efficiency = speedup / num_threads;
+    double rmse = calculate_rmse(output_serial, output_openmp, width, height);
+
+    printf("==================== RESULTS ====================\n");
+    printf("  Image size       : %d x %d\n", width, height);
+    printf("  Total pixels     : %d\n", img_size);
+    printf("  Kernel size      : %d x %d\n", KERNEL_SIZE, KERNEL_SIZE);
+    printf("  Threads          : %d\n", num_threads);
+    printf("  -----------------------------------------\n");
+    printf("  Serial time      : %.6f seconds\n", serial_time);
+    printf("  OpenMP time      : %.6f seconds\n", omp_time);
+    printf("  Speedup          : %.4f x\n", speedup);
+    printf("  Efficiency       : %.4f (%.1f%%)\n", efficiency, efficiency * 100.0);
+    printf("  Throughput       : %.2f Mpixels/sec\n", img_size / (omp_time * 1e6));
+    printf("  RMSE             : %.6f\n", rmse);
+    printf("=================================================\n\n");
+
+    if (rmse < 1e-6)
+    {
+        printf("[VERIFY] PASSED - Output matches serial baseline exactly.\n");
+    }
+    else if (rmse < 1.0)
+    {
+        printf("[VERIFY] PASSED - Output within acceptable tolerance (RMSE < 1.0).\n");
+    }
+    else
+    {
+        printf("[VERIFY] WARNING - Significant difference from serial baseline!\n");
+    }
+
+    /* Write output image */
     write_pgm(output_filename, output_openmp, width, height, maxval);
 
-    printf("[INFO] Serial and OpenMP convolution completed.\n");
-
+    /* Cleanup */
     free(input_image);
     free(output_serial);
     free(output_openmp);
-    return 0;
+
+    printf("\n[DONE] OpenMP convolution completed successfully.\n");
+    return EXIT_SUCCESS;
 }
