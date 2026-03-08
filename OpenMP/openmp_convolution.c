@@ -151,7 +151,7 @@ void normalize_kernel(float kernel[KERNEL_SIZE][KERNEL_SIZE])
     }
 }
 
-/* ========================= Serial Convolution ========================= */
+/* ========================= Convolution ========================= */
 
 void convolve_serial(const unsigned char *input, unsigned char *output,
                      int width, int height, float kernel[KERNEL_SIZE][KERNEL_SIZE])
@@ -161,6 +161,44 @@ void convolve_serial(const unsigned char *input, unsigned char *output,
         for (int col = 0; col < width; col++)
         {
             float sum = 0.0f;
+            for (int ki = -KERNEL_RADIUS; ki <= KERNEL_RADIUS; ki++)
+            {
+                for (int kj = -KERNEL_RADIUS; kj <= KERNEL_RADIUS; kj++)
+                {
+                    int ni = row + ki;
+                    int nj = col + kj;
+
+                    if (ni >= 0 && ni < height && nj >= 0 && nj < width)
+                    {
+                        sum += input[ni * width + nj] *
+                               kernel[ki + KERNEL_RADIUS][kj + KERNEL_RADIUS];
+                    }
+                }
+            }
+
+            if (sum < 0.0f)
+                sum = 0.0f;
+            if (sum > 255.0f)
+                sum = 255.0f;
+            output[row * width + col] = (unsigned char)(sum + 0.5f);
+        }
+    }
+}
+
+void convolve_openmp(const unsigned char *input, unsigned char *output,
+                     int width, int height,
+                     float kernel[KERNEL_SIZE][KERNEL_SIZE],
+                     int num_threads)
+{
+    omp_set_num_threads(num_threads);
+
+#pragma omp parallel for schedule(dynamic, 16) shared(input, output, kernel)
+    for (int row = 0; row < height; row++)
+    {
+        for (int col = 0; col < width; col++)
+        {
+            float sum = 0.0f;
+
             for (int ki = -KERNEL_RADIUS; ki <= KERNEL_RADIUS; ki++)
             {
                 for (int kj = -KERNEL_RADIUS; kj <= KERNEL_RADIUS; kj++)
@@ -199,6 +237,7 @@ int main(int argc, char *argv[])
 {
     unsigned char *input_image = NULL;
     unsigned char *output_serial = NULL;
+    unsigned char *output_openmp = NULL;
     int width, height, maxval = 255;
     const char *output_filename = NULL;
     int num_threads = DEFAULT_NUM_THREADS;
@@ -241,23 +280,30 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    if (num_threads < 1)
+        num_threads = 1;
+
     int img_size = width * height;
     output_serial = (unsigned char *)malloc(img_size * sizeof(unsigned char));
-    if (!output_serial)
+    output_openmp = (unsigned char *)malloc(img_size * sizeof(unsigned char));
+    if (!output_serial || !output_openmp)
     {
         fprintf(stderr, "Error: Memory allocation failed\n");
         free(input_image);
+        free(output_openmp);
         free(output_serial);
         return EXIT_FAILURE;
     }
 
     normalize_kernel(gaussian_kernel);
     convolve_serial(input_image, output_serial, width, height, gaussian_kernel);
-    write_pgm(output_filename, output_serial, width, height, maxval);
+    convolve_openmp(input_image, output_openmp, width, height, gaussian_kernel, num_threads);
+    write_pgm(output_filename, output_openmp, width, height, maxval);
 
-    printf("[INFO] Serial baseline completed.\n");
+    printf("[INFO] Serial and OpenMP convolution completed.\n");
 
     free(input_image);
     free(output_serial);
+    free(output_openmp);
     return 0;
 }
