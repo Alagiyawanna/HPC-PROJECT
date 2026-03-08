@@ -345,8 +345,6 @@ int main(int argc, char *argv[])
     {
         fprintf(stderr, "Error: Memory allocation failed\n");
         free(input_image);
-        free(output_serial);
-        free(output_openmp);
         return EXIT_FAILURE;
     }
 
