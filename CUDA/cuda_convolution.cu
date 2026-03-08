@@ -41,7 +41,7 @@
 
 __constant__ float d_kernel[KERNEL_SIZE * KERNEL_SIZE];
 
-/* ========================= CUDA Kernel ========================= */
+/* ========================= CUDA Kernels ========================= */
 
 __global__ void convolve_naive_kernel(const unsigned char *input,
                                       unsigned char *output,
@@ -76,6 +76,57 @@ __global__ void convolve_naive_kernel(const unsigned char *input,
         sum = 255.0f;
 
     output[row * width + col] = (unsigned char)(sum + 0.5f);
+}
+
+__global__ void convolve_tiled_kernel(const unsigned char *input,
+                                      unsigned char *output,
+                                      int width, int height)
+{
+    __shared__ float tile[TILE_HEIGHT][TILE_WIDTH];
+
+    int col = blockIdx.x * BLOCK_WIDTH + threadIdx.x;
+    int row = blockIdx.y * BLOCK_HEIGHT + threadIdx.y;
+
+    for (int ty = threadIdx.y; ty < TILE_HEIGHT; ty += BLOCK_HEIGHT)
+    {
+        for (int tx = threadIdx.x; tx < TILE_WIDTH; tx += BLOCK_WIDTH)
+        {
+            int src_row = (int)(blockIdx.y * BLOCK_HEIGHT) - KERNEL_RADIUS + ty;
+            int src_col = (int)(blockIdx.x * BLOCK_WIDTH) - KERNEL_RADIUS + tx;
+
+            if (src_row >= 0 && src_row < height && src_col >= 0 && src_col < width)
+            {
+                tile[ty][tx] = (float)input[src_row * width + src_col];
+            }
+            else
+            {
+                tile[ty][tx] = 0.0f;
+            }
+        }
+    }
+
+    __syncthreads();
+
+    if (row < height && col < width)
+    {
+        float sum = 0.0f;
+
+        for (int ki = 0; ki < KERNEL_SIZE; ki++)
+        {
+            for (int kj = 0; kj < KERNEL_SIZE; kj++)
+            {
+                sum += tile[threadIdx.y + ki][threadIdx.x + kj] *
+                       d_kernel[ki * KERNEL_SIZE + kj];
+            }
+        }
+
+        if (sum < 0.0f)
+            sum = 0.0f;
+        if (sum > 255.0f)
+            sum = 255.0f;
+
+        output[row * width + col] = (unsigned char)(sum + 0.5f);
+    }
 }
 
 /* ========================= PGM Image I/O ========================= */
@@ -345,7 +396,7 @@ int main(int argc, char *argv[])
     dim3 gridDim((width + BLOCK_WIDTH - 1) / BLOCK_WIDTH,
                  (height + BLOCK_HEIGHT - 1) / BLOCK_HEIGHT);
 
-    convolve_naive_kernel<<<gridDim, blockDim>>>(d_input, d_output, width, height);
+    convolve_tiled_kernel<<<gridDim, blockDim>>>(d_input, d_output, width, height);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
