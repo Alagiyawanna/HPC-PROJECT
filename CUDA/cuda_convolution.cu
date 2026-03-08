@@ -41,6 +41,43 @@
 
 __constant__ float d_kernel[KERNEL_SIZE * KERNEL_SIZE];
 
+/* ========================= CUDA Kernel ========================= */
+
+__global__ void convolve_naive_kernel(const unsigned char *input,
+                                      unsigned char *output,
+                                      int width, int height)
+{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (row >= height || col >= width)
+        return;
+
+    float sum = 0.0f;
+
+    for (int ki = -KERNEL_RADIUS; ki <= KERNEL_RADIUS; ki++)
+    {
+        for (int kj = -KERNEL_RADIUS; kj <= KERNEL_RADIUS; kj++)
+        {
+            int ni = row + ki;
+            int nj = col + kj;
+
+            if (ni >= 0 && ni < height && nj >= 0 && nj < width)
+            {
+                sum += (float)input[ni * width + nj] *
+                       d_kernel[(ki + KERNEL_RADIUS) * KERNEL_SIZE + (kj + KERNEL_RADIUS)];
+            }
+        }
+    }
+
+    if (sum < 0.0f)
+        sum = 0.0f;
+    if (sum > 255.0f)
+        sum = 255.0f;
+
+    output[row * width + col] = (unsigned char)(sum + 0.5f);
+}
+
 /* ========================= PGM Image I/O ========================= */
 
 unsigned char *read_pgm(const char *filename, int *width, int *height, int *maxval)
@@ -230,7 +267,10 @@ void print_usage(const char *prog)
 int main(int argc, char *argv[])
 {
     unsigned char *h_input = NULL;
+    unsigned char *h_output_gpu = NULL;
     unsigned char *h_output_serial = NULL;
+    unsigned char *d_input = NULL;
+    unsigned char *d_output = NULL;
     int width, height, maxval = 255;
     const char *output_filename = NULL;
 
@@ -275,8 +315,10 @@ int main(int argc, char *argv[])
     }
 
     int img_size = width * height;
+ 
+    h_output_gpu = (unsigned char *)malloc(img_size * sizeof(unsigned char));
     h_output_serial = (unsigned char *)malloc(img_size * sizeof(unsigned char));
-    if (!h_output_serial)
+    if (!h_output_gpu || !h_output_serial)
     {
         fprintf(stderr, "Error: Host memory allocation failed\n");
         free(h_input);
@@ -284,15 +326,44 @@ int main(int argc, char *argv[])
     }
 
     normalize_kernel(h_kernel);
+
+    float flat_kernel[KERNEL_SIZE * KERNEL_SIZE];
+    for (int i = 0; i < KERNEL_SIZE; i++)
+        for (int j = 0; j < KERNEL_SIZE; j++)
+            flat_kernel[i * KERNEL_SIZE + j] = h_kernel[i][j];
+
+    CUDA_CHECK(cudaMemcpyToSymbol(d_kernel, flat_kernel,
+                                  KERNEL_SIZE * KERNEL_SIZE * sizeof(float)));
+
+    CUDA_CHECK(cudaMalloc((void **)&d_input, img_size * sizeof(unsigned char)));
+    CUDA_CHECK(cudaMalloc((void **)&d_output, img_size * sizeof(unsigned char)));
+
+    CUDA_CHECK(cudaMemcpy(d_input, h_input, img_size * sizeof(unsigned char),
+                          cudaMemcpyHostToDevice));
+
+    dim3 blockDim(BLOCK_WIDTH, BLOCK_HEIGHT);
+    dim3 gridDim((width + BLOCK_WIDTH - 1) / BLOCK_WIDTH,
+                 (height + BLOCK_HEIGHT - 1) / BLOCK_HEIGHT);
+
+    convolve_naive_kernel<<<gridDim, blockDim>>>(d_input, d_output, width, height);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemcpy(h_output_gpu, d_output, img_size * sizeof(unsigned char),
+                          cudaMemcpyDeviceToHost));
+
     convolve_serial(h_input, h_output_serial, width, height, h_kernel);
 
-    write_pgm(output_filename, h_output_serial, width, height, maxval);
+    printf("[INFO] RMSE (CPU vs GPU): %.6f\n",
+           calculate_rmse(h_output_serial, h_output_gpu, width, height));
 
-    printf("[INFO] Serial convolution completed.\n");
-    printf("[INFO] RMSE self-check: %.6f\n",
-           calculate_rmse(h_output_serial, h_output_serial, width, height));
+    write_pgm(output_filename, h_output_gpu, width, height, maxval);
+
+    CUDA_CHECK(cudaFree(d_input));
+    CUDA_CHECK(cudaFree(d_output));
 
     free(h_input);
+    free(h_output_gpu);
     free(h_output_serial);
     return 0;
 }
