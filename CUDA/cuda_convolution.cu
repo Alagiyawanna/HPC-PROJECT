@@ -151,6 +151,73 @@ unsigned char *generate_test_image(int width, int height)
     return data;
 }
 
+/* ========================= Serial Baseline ========================= */
+
+void convolve_serial(const unsigned char *input, unsigned char *output,
+                     int width, int height, float kernel[KERNEL_SIZE][KERNEL_SIZE])
+{
+    for (int row = 0; row < height; row++)
+    {
+        for (int col = 0; col < width; col++)
+        {
+            float sum = 0.0f;
+
+            for (int ki = -KERNEL_RADIUS; ki <= KERNEL_RADIUS; ki++)
+            {
+                for (int kj = -KERNEL_RADIUS; kj <= KERNEL_RADIUS; kj++)
+                {
+                    int ni = row + ki;
+                    int nj = col + kj;
+
+                    if (ni >= 0 && ni < height && nj >= 0 && nj < width)
+                    {
+                        sum += input[ni * width + nj] *
+                               kernel[ki + KERNEL_RADIUS][kj + KERNEL_RADIUS];
+                    }
+                }
+            }
+
+            if (sum < 0.0f)
+                sum = 0.0f;
+            if (sum > 255.0f)
+                sum = 255.0f;
+
+            output[row * width + col] = (unsigned char)(sum + 0.5f);
+        }
+    }
+}
+
+void normalize_kernel(float kernel[KERNEL_SIZE][KERNEL_SIZE])
+{
+    float sum = 0.0f;
+
+    for (int i = 0; i < KERNEL_SIZE; i++)
+        for (int j = 0; j < KERNEL_SIZE; j++)
+            sum += kernel[i][j];
+
+    if (fabs(sum) > 1e-6)
+    {
+        for (int i = 0; i < KERNEL_SIZE; i++)
+            for (int j = 0; j < KERNEL_SIZE; j++)
+                kernel[i][j] /= sum;
+    }
+}
+
+double calculate_rmse(const unsigned char *img1, const unsigned char *img2,
+                      int width, int height)
+{
+    double sum_sq = 0.0;
+    int total_pixels = width * height;
+
+    for (int i = 0; i < total_pixels; i++)
+    {
+        double diff = (double)img1[i] - (double)img2[i];
+        sum_sq += diff * diff;
+    }
+
+    return sqrt(sum_sq / total_pixels);
+}
+
 /* ========================= Utility ========================= */
 
 void print_usage(const char *prog)
@@ -163,14 +230,20 @@ void print_usage(const char *prog)
 int main(int argc, char *argv[])
 {
     unsigned char *h_input = NULL;
+    unsigned char *h_output_serial = NULL;
     int width, height, maxval = 255;
     const char *output_filename = NULL;
+
+    float h_kernel[KERNEL_SIZE][KERNEL_SIZE] = {
+        {1.0f, 2.0f, 1.0f},
+        {2.0f, 4.0f, 2.0f},
+        {1.0f, 2.0f, 1.0f}};
 
     printf("============================================\n");
     printf("  CUDA Image Convolution (CPU + GPU Hybrid)\n");
     printf("  EC7207 - High Performance Computing\n");
     printf("============================================\n\n");
-    
+
     if (argc >= 3 && strcmp(argv[1], "--generate") != 0)
     {
         h_input = read_pgm(argv[1], &width, &height, &maxval);
@@ -201,11 +274,25 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    printf("[INFO] Ready for processing.\n");
-    printf("[INFO] Output file will be: %s\n", output_filename);
+    int img_size = width * height;
+    h_output_serial = (unsigned char *)malloc(img_size * sizeof(unsigned char));
+    if (!h_output_serial)
+    {
+        fprintf(stderr, "Error: Host memory allocation failed\n");
+        free(h_input);
+        return EXIT_FAILURE;
+    }
+
+    normalize_kernel(h_kernel);
+    convolve_serial(h_input, h_output_serial, width, height, h_kernel);
+
+    write_pgm(output_filename, h_output_serial, width, height, maxval);
+
+    printf("[INFO] Serial convolution completed.\n");
+    printf("[INFO] RMSE self-check: %.6f\n",
+           calculate_rmse(h_output_serial, h_output_serial, width, height));
 
     free(h_input);
-    return 0;
-
+    free(h_output_serial);
     return 0;
 }
