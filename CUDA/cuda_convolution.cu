@@ -26,7 +26,6 @@
 #include <string.h>
 #include <math.h>
 #include <cuda_runtime.h>
-#include <time.h>
 
 /* ========================= Configuration ========================= */
 
@@ -118,10 +117,15 @@ __global__ void convolve_tiled_kernel(const unsigned char *input,
     int col = blockIdx.x * BLOCK_WIDTH + threadIdx.x;
     int row = blockIdx.y * BLOCK_HEIGHT + threadIdx.y;
 
+    /* Input coordinates (shifted by halo radius) */
+    int input_row = row - KERNEL_RADIUS;
+    int input_col = col - KERNEL_RADIUS;
+
     /* Load tile into shared memory */
     /* Each thread loads one element of the tile */
     /* We need TILE_WIDTH * TILE_HEIGHT elements but have BLOCK_WIDTH * BLOCK_HEIGHT threads */
     /* So some threads load multiple elements */
+
     for (int ty = threadIdx.y; ty < TILE_HEIGHT; ty += BLOCK_HEIGHT)
     {
         for (int tx = threadIdx.x; tx < TILE_WIDTH; tx += BLOCK_WIDTH)
@@ -355,13 +359,6 @@ void print_gpu_info()
     printf("\n");
 }
 
-static double get_time_seconds(void)
-{
-    struct timespec ts;
-    timespec_get(&ts, TIME_UTC);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-}
-
 /* ========================= Main Program ========================= */
 
 void print_usage(const char *prog)
@@ -520,11 +517,13 @@ int main(int argc, char *argv[])
     /* =========== Serial Baseline =========== */
     printf("[STATUS] Running serial CPU baseline for comparison...\n");
 
-    double serial_start = get_time_seconds();
+    struct timespec ts_start, ts_end;
+    clock_gettime(CLOCK_MONOTONIC, &ts_start);
     convolve_serial(h_input, h_output_serial, width, height, h_kernel);
-    double serial_end = get_time_seconds();
+    clock_gettime(CLOCK_MONOTONIC, &ts_end);
 
-    double serial_time = serial_end - serial_start;
+    double serial_time = (ts_end.tv_sec - ts_start.tv_sec) +
+                         (ts_end.tv_nsec - ts_start.tv_nsec) * 1e-9;
     printf("[STATUS] Serial complete: %.6f seconds\n\n", serial_time);
 
     /* =========== Performance Analysis =========== */
