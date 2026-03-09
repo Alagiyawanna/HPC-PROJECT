@@ -6,6 +6,7 @@
  *
  * Description:
  *   Performs 2D convolution on a grayscale PGM image using a serial approach.
+ *   Supports multiple convolution kernels: Gaussian Blur, Sharpen, Edge Detection.
  *   This serves as the baseline for performance comparison with parallel
  *   implementations (OpenMP, MPI, CUDA).
  *
@@ -13,8 +14,17 @@
  *   gcc -O2 -o serial_conv serial_convolution.c -lm
  *
  * Usage:
- *   ./serial_conv <input.pgm> <output.pgm>
- *   ./serial_conv --generate <width> <height> <output.pgm>
+ *   ./serial_conv <input.pgm> <output.pgm> [kernel_type]
+ *   ./serial_conv --generate <width> <height> <output.pgm> [kernel_type]
+ *
+ *   kernel_type options:
+ *     blur     - Gaussian Blur 3x3 (default, smooths the image)
+ *     sharpen  - Sharpen 3x3 (enhances edges and details)
+ *     edge     - Edge Detection 3x3 (Laplacian, highlights boundaries)
+ *
+ * Examples:
+ *   ./serial_conv input.pgm output.pgm blur
+ *   ./serial_conv --generate 1024 1024 test.pgm edge
  *
  * =============================================================================
  */
@@ -25,89 +35,97 @@
 #include <math.h>
 #include <time.h>
 
-/* ========================= Configuration ========================= */
+#ifdef _WIN32
+    #include <windows.h>  // For QueryPerformanceCounter on Windows
+#endif
 
-/* Convolution Kernel Definitions */
-#define KERNEL_SIZE 3
-#define KERNEL_RADIUS (KERNEL_SIZE / 2)
+// Configuration - we define three different convolution filters that produce different effects
+#define KERNEL_SIZE 3 
+#define KERNEL_RADIUS (KERNEL_SIZE / 2) 
 
-/* Gaussian Blur 3x3 Kernel (unnormalized, will normalize at runtime) */
+// Kernel type enumeration - makes code more readable than using magic numbers
+typedef enum {
+    KERNEL_BLUR,
+    KERNEL_SHARPEN,
+    KERNEL_EDGE
+} KernelType;
+
+// Each kernel does something different to the image:
+
+// Gaussian Blur - smooths the image by averaging nearby pixels
+// Higher weight in center, lower on edges creates natural blur
+// We'll normalize this at runtime so all weights sum to 1
 static float gaussian_kernel[KERNEL_SIZE][KERNEL_SIZE] = {
     {1.0f, 2.0f, 1.0f},
     {2.0f, 4.0f, 2.0f},
-    {1.0f, 2.0f, 1.0f}};
+    {1.0f, 2.0f, 1.0f}
+};
 
-/* Sharpen 3x3 Kernel */
+// Sharpen - makes edges crisper by emphasizing differences
+// Center is positive, neighbors are negative - enhances contrast
 static float sharpen_kernel[KERNEL_SIZE][KERNEL_SIZE] = {
-    {0.0f, -1.0f, 0.0f},
-    {-1.0f, 5.0f, -1.0f},
-    {0.0f, -1.0f, 0.0f}};
+    { 0.0f, -1.0f,  0.0f},
+    {-1.0f,  5.0f, -1.0f},
+    { 0.0f, -1.0f,  0.0f}
+};
 
-/* Edge Detection (Laplacian) 3x3 Kernel */
+// Edge Detection (Laplacian) - finds boundaries in the image
+// Highlights areas where pixel values change rapidly (edges)
 static float edge_kernel[KERNEL_SIZE][KERNEL_SIZE] = {
     {-1.0f, -1.0f, -1.0f},
-    {-1.0f, 8.0f, -1.0f},
-    {-1.0f, -1.0f, -1.0f}};
+    {-1.0f,  8.0f, -1.0f},
+    {-1.0f, -1.0f, -1.0f}
+};
 
 /* ========================= PGM Image I/O ========================= */
 
-/**
- * Read a PGM (P5 binary) grayscale image from file.
- * Returns pixel data as a dynamically allocated array.
- */
+// PGM (Portable GrayMap) is chosen because it's dead simple:
+// Just a header + raw bytes, no compression, easy to read in pure C
 unsigned char *read_pgm(const char *filename, int *width, int *height, int *maxval)
 {
     FILE *fp = fopen(filename, "rb");
-    if (!fp)
-    {
+    if (!fp) {
         fprintf(stderr, "Error: Cannot open file '%s'\n", filename);
         return NULL;
     }
 
-    /* Read magic number */
+    // PGM files start with "P5" magic number for binary format
     char magic[3];
-    if (fscanf(fp, "%2s", magic) != 1 || strcmp(magic, "P5") != 0)
-    {
+    if (fscanf(fp, "%2s", magic) != 1 || strcmp(magic, "P5") != 0) {
         fprintf(stderr, "Error: File '%s' is not a valid P5 PGM file\n", filename);
         fclose(fp);
         return NULL;
     }
 
-    /* Skip comments */
+    // Skip any comment lines (start with #)
     int ch;
-    while ((ch = fgetc(fp)) == '#' || ch == '\n' || ch == '\r' || ch == ' ')
-    {
-        if (ch == '#')
-        {
-            while ((ch = fgetc(fp)) != '\n' && ch != EOF)
-                ;
+    while ((ch = fgetc(fp)) == '#' || ch == '\n' || ch == '\r' || ch == ' ') {
+        if (ch == '#') {
+            while ((ch = fgetc(fp)) != '\n' && ch != EOF);
         }
     }
     ungetc(ch, fp);
 
-    /* Read dimensions and max value */
-    if (fscanf(fp, "%d %d %d", width, height, maxval) != 3)
-    {
+    // Read image dimensions and max pixel value (usually 255)
+    if (fscanf(fp, "%d %d %d", width, height, maxval) != 3) {
         fprintf(stderr, "Error: Cannot read PGM header\n");
         fclose(fp);
         return NULL;
     }
 
-    /* Skip single whitespace character after maxval */
-    fgetc(fp);
+    fgetc(fp); // skip the single whitespace after maxval
 
-    /* Allocate and read pixel data */
+    // Allocate memory for the entire image (width × height bytes)
     int size = (*width) * (*height);
     unsigned char *data = (unsigned char *)malloc(size * sizeof(unsigned char));
-    if (!data)
-    {
+    if (!data) {
         fprintf(stderr, "Error: Memory allocation failed\n");
         fclose(fp);
         return NULL;
     }
 
-    if (fread(data, sizeof(unsigned char), size, fp) != (size_t)size)
-    {
+    // Read all pixel data in one go - each pixel is one byte (0-255)
+    if (fread(data, sizeof(unsigned char), size, fp) != (size_t)size) {
         fprintf(stderr, "Error: Cannot read pixel data\n");
         free(data);
         fclose(fp);
@@ -119,18 +137,16 @@ unsigned char *read_pgm(const char *filename, int *width, int *height, int *maxv
     return data;
 }
 
-/**
- * Write a PGM (P5 binary) grayscale image to file.
- */
+// Write the result back as a PGM file
 int write_pgm(const char *filename, unsigned char *data, int width, int height, int maxval)
 {
     FILE *fp = fopen(filename, "wb");
-    if (!fp)
-    {
+    if (!fp) {
         fprintf(stderr, "Error: Cannot create file '%s'\n", filename);
         return -1;
     }
 
+    // Write PGM header, then dump all pixel bytes
     fprintf(fp, "P5\n%d %d\n%d\n", width, height, maxval);
     fwrite(data, sizeof(unsigned char), width * height, fp);
     fclose(fp);
@@ -139,41 +155,35 @@ int write_pgm(const char *filename, unsigned char *data, int width, int height, 
     return 0;
 }
 
-/**
- * Generate a test grayscale image with patterns.
- * Creates a combination of gradients and geometric shapes.
- */
+// Generate a synthetic test image if user doesn't have a real one
+// Creates a nice pattern with gradient + shapes for testing
 unsigned char *generate_test_image(int width, int height)
 {
     unsigned char *data = (unsigned char *)malloc(width * height * sizeof(unsigned char));
-    if (!data)
-    {
+    if (!data) {
         fprintf(stderr, "Error: Memory allocation failed\n");
         return NULL;
     }
 
-    for (int i = 0; i < height; i++)
-    {
-        for (int j = 0; j < width; j++)
-        {
-            /* Diagonal gradient */
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            // Start with a diagonal gradient from dark to light
             int val = (int)(255.0 * (i + j) / (height + width));
 
-            /* Add a white rectangle in the center */
+            // Add a light rectangle in the center
             if (i > height / 4 && i < 3 * height / 4 &&
-                j > width / 4 && j < 3 * width / 4)
-            {
+                j > width / 4 && j < 3 * width / 4) {
                 val = 200;
             }
 
-            /* Add a dark circle */
+            // Add a dark circle overlapping the rectangle
             int ci = height / 2, cj = width / 2;
-            int radius = height < width ? height / 6 : width / 6;
-            if ((i - ci) * (i - ci) + (j - cj) * (j - cj) < radius * radius)
-            {
+            int radius = (height < width ? height : width) / 6;
+            if ((i - ci) * (i - ci) + (j - cj) * (j - cj) < radius * radius) {
                 val = 50;
             }
 
+            // Clamp to valid pixel range
             data[i * width + j] = (unsigned char)(val > 255 ? 255 : (val < 0 ? 0 : val));
         }
     }
@@ -184,84 +194,72 @@ unsigned char *generate_test_image(int width, int height)
 
 /* ========================= Convolution ========================= */
 
-/**
- * Normalize the convolution kernel so that all weights sum to 1.
- * Only applied for kernels where the sum is non-zero (e.g., blur).
- */
+// For blur kernels, we want the weights to sum to 1 so brightness doesn't change
+// For sharpen/edge, we keep them as-is (they sum to 1 or 0 already)
 void normalize_kernel(float kernel[KERNEL_SIZE][KERNEL_SIZE])
 {
     float sum = 0.0f;
-    for (int i = 0; i < KERNEL_SIZE; i++)
-        for (int j = 0; j < KERNEL_SIZE; j++)
+    for (int i = 0; i < KERNEL_SIZE; i++) {
+        for (int j = 0; j < KERNEL_SIZE; j++) {
             sum += kernel[i][j];
+        }
+    }
 
-    if (fabs(sum) > 1e-6)
-    {
-        for (int i = 0; i < KERNEL_SIZE; i++)
-            for (int j = 0; j < KERNEL_SIZE; j++)
+    // Only normalize if sum is significantly non-zero (for blur)
+    if (fabs(sum) > 1e-6) {
+        for (int i = 0; i < KERNEL_SIZE; i++) {
+            for (int j = 0; j < KERNEL_SIZE; j++) {
                 kernel[i][j] /= sum;
+            }
+        }
     }
 }
 
-/**
- * Apply 2D convolution on a grayscale image (serial implementation).
- *
- * For each pixel (row, col), the convolution computes:
- *   output(row, col) = SUM over kernel of input(row+ki, col+kj) * kernel(ki, kj)
- *
- * Boundary handling: Zero-padding (pixels outside the image are treated as 0).
- */
+// The core convolution algorithm - this is what we're benchmarking
+// For each output pixel, we multiply neighbors by kernel weights and sum them
 void convolve_serial(const unsigned char *input, unsigned char *output,
                      int width, int height,
                      float kernel[KERNEL_SIZE][KERNEL_SIZE])
 {
-    for (int row = 0; row < height; row++)
-    {
-        for (int col = 0; col < width; col++)
-        {
+    // Loop through every pixel in the output image
+    for (int row = 0; row < height; row++) {
+        for (int col = 0; col < width; col++) {
             float sum = 0.0f;
 
-            /* Apply kernel centered at (row, col) */
-            for (int ki = -KERNEL_RADIUS; ki <= KERNEL_RADIUS; ki++)
-            {
-                for (int kj = -KERNEL_RADIUS; kj <= KERNEL_RADIUS; kj++)
-                {
-                    int ni = row + ki; /* Neighbor row */
-                    int nj = col + kj; /* Neighbor col */
+            // Apply the 3x3 kernel centered at this pixel
+            for (int ki = -KERNEL_RADIUS; ki <= KERNEL_RADIUS; ki++) {
+                for (int kj = -KERNEL_RADIUS; kj <= KERNEL_RADIUS; kj++) {
+                    int ni = row + ki; // neighbor row
+                    int nj = col + kj; // neighbor col
 
-                    /* Zero-padding boundary check */
-                    if (ni >= 0 && ni < height && nj >= 0 && nj < width)
-                    {
-                        sum += input[ni * width + nj] *
+                    // Zero-padding: pretend out-of-bounds pixels are black
+                    if (ni >= 0 && ni < height && nj >= 0 && nj < width) {
+                        sum += input[ni * width + nj] * 
                                kernel[ki + KERNEL_RADIUS][kj + KERNEL_RADIUS];
                     }
                 }
             }
 
-            /* Clamp result to [0, 255] */
-            if (sum < 0.0f)
-                sum = 0.0f;
-            if (sum > 255.0f)
-                sum = 255.0f;
-            output[row * width + col] = (unsigned char)(sum + 0.5f);
+            // Clamp the result to valid pixel range [0, 255]
+            if (sum < 0.0f) sum = 0.0f;
+            if (sum > 255.0f) sum = 255.0f;
+            
+            output[row * width + col] = (unsigned char)(sum + 0.5f); // round to nearest
         }
     }
 }
 
 /* ========================= RMSE Calculation ========================= */
 
-/**
- * Calculate Root Mean Square Error between two images.
- * Used to verify correctness of parallel implementations.
- */
+// Root Mean Square Error - measures how different two images are
+// Used by parallel versions to verify they match the serial output
 double calculate_rmse(const unsigned char *img1, const unsigned char *img2,
                       int width, int height)
 {
     double sum_sq = 0.0;
     int total_pixels = width * height;
 
-    for (int i = 0; i < total_pixels; i++)
-    {
+    for (int i = 0; i < total_pixels; i++) {
         double diff = (double)img1[i] - (double)img2[i];
         sum_sq += diff * diff;
     }
@@ -271,24 +269,83 @@ double calculate_rmse(const unsigned char *img1, const unsigned char *img2,
 
 /* ========================= Timing Utility ========================= */
 
-/**
- * Get current time in seconds using high-resolution clock.
- */
+// High-resolution timer - cross-platform implementation
+// Windows uses QueryPerformanceCounter, Linux/Unix uses clock_gettime
 double get_time_seconds(void)
 {
+#ifdef _WIN32
+    // Windows: use QueryPerformanceCounter for high-resolution timing
+    static double frequency = 0.0;
+    static int initialized = 0;
+    LARGE_INTEGER count, freq;
+    
+    if (!initialized) {
+        QueryPerformanceFrequency(&freq);
+        frequency = (double)freq.QuadPart;
+        initialized = 1;
+    }
+    
+    QueryPerformanceCounter(&count);
+    return (double)count.QuadPart / frequency;
+#else
+    // Linux/Unix: use clock_gettime with CLOCK_MONOTONIC
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
+#endif
+}
+
+/* ========================= Kernel Selection ========================= */
+
+// Parse the kernel name from command line and return the right kernel
+const char* get_kernel_name(KernelType type)
+{
+    switch(type) {
+        case KERNEL_BLUR:    return "Gaussian Blur";
+        case KERNEL_SHARPEN: return "Sharpen";
+        case KERNEL_EDGE:    return "Edge Detection";
+        default:             return "Unknown";
+    }
+}
+
+KernelType parse_kernel_type(const char *str)
+{
+    if (!str || strcmp(str, "blur") == 0) {
+        return KERNEL_BLUR;  // default
+    } else if (strcmp(str, "sharpen") == 0) {
+        return KERNEL_SHARPEN;
+    } else if (strcmp(str, "edge") == 0) {
+        return KERNEL_EDGE;
+    } else {
+        fprintf(stderr, "Warning: Unknown kernel '%s', using blur\n", str);
+        return KERNEL_BLUR;
+    }
+}
+
+float (*get_kernel(KernelType type))[KERNEL_SIZE]
+{
+    switch(type) {
+        case KERNEL_BLUR:    return gaussian_kernel;
+        case KERNEL_SHARPEN: return sharpen_kernel;
+        case KERNEL_EDGE:    return edge_kernel;
+        default:             return gaussian_kernel;
+    }
 }
 
 /* ========================= Main Program ========================= */
 
 void print_usage(const char *prog)
 {
-    printf("Usage:\n");
-    printf("  %s <input.pgm> <output.pgm>\n", prog);
-    printf("  %s --generate <width> <height> <output.pgm>\n", prog);
-    printf("\nThis program applies 2D convolution (Gaussian blur) on a PGM image.\n");
+    printf("\nUsage:\n");
+    printf("  %s <input.pgm> <output.pgm> [kernel_type]\n", prog);
+    printf("  %s --generate <width> <height> <output.pgm> [kernel_type]\n\n", prog);
+    printf("Kernel types:\n");
+    printf("  blur     - Gaussian Blur (default, smooths image)\n");
+    printf("  sharpen  - Sharpen (enhances edges)\n");
+    printf("  edge     - Edge Detection (Laplacian)\n\n");
+    printf("Examples:\n");
+    printf("  %s photo.pgm blurred.pgm blur\n", prog);
+    printf("  %s --generate 1024 1024 test.pgm edge\n\n", prog);
 }
 
 int main(int argc, char *argv[])
@@ -297,100 +354,111 @@ int main(int argc, char *argv[])
     unsigned char *output_image = NULL;
     int width, height, maxval = 255;
     const char *output_filename = NULL;
+    KernelType kernel_type = KERNEL_BLUR; // default
 
     printf("============================================\n");
     printf("  Serial Image Convolution (Baseline)\n");
     printf("  EC7207 - High Performance Computing\n");
     printf("============================================\n\n");
 
-    /* Parse command-line arguments */
-    if (argc == 3)
-    {
-        /* Read from file */
+    // Parse command-line arguments - support multiple modes and kernel selection
+    if (argc >= 3 && argc <= 4) {
+        // Mode 1: Read from file
         input_image = read_pgm(argv[1], &width, &height, &maxval);
-        if (!input_image)
-            return EXIT_FAILURE;
+        if (!input_image) return EXIT_FAILURE;
+        
         output_filename = argv[2];
+        
+        // Optional kernel type
+        if (argc == 4) {
+            kernel_type = parse_kernel_type(argv[3]);
+        }
     }
-    else if (argc == 5 && strcmp(argv[1], "--generate") == 0)
-    {
-        /* Generate test image */
+    else if (argc >= 5 && argc <= 6 && strcmp(argv[1], "--generate") == 0) {
+        // Mode 2: Generate test image
         width = atoi(argv[2]);
         height = atoi(argv[3]);
-        if (width <= 0 || height <= 0)
-        {
+        
+        if (width <= 0 || height <= 0) {
             fprintf(stderr, "Error: Invalid dimensions %d x %d\n", width, height);
             return EXIT_FAILURE;
         }
+        
         input_image = generate_test_image(width, height);
-        if (!input_image)
-            return EXIT_FAILURE;
+        if (!input_image) return EXIT_FAILURE;
+        
         output_filename = argv[4];
+        
+        // Optional kernel type
+        if (argc == 6) {
+            kernel_type = parse_kernel_type(argv[5]);
+        }
 
-        /* Save generated input image for reference */
+        // Save the generated input for visual inspection
         write_pgm("serial_input.pgm", input_image, width, height, maxval);
     }
-    else
-    {
+    else {
         print_usage(argv[0]);
         return EXIT_FAILURE;
     }
 
-    /* Allocate output image */
+    // Allocate space for the output image
     output_image = (unsigned char *)malloc(width * height * sizeof(unsigned char));
-    if (!output_image)
-    {
+    if (!output_image) {
         fprintf(stderr, "Error: Memory allocation failed\n");
         free(input_image);
         return EXIT_FAILURE;
     }
 
-    /* Normalize the Gaussian kernel */
-    normalize_kernel(gaussian_kernel);
+    // Get the selected kernel and normalize it if needed (blur only)
+    float (*kernel)[KERNEL_SIZE] = get_kernel(kernel_type);
+    if (kernel_type == KERNEL_BLUR) {
+        normalize_kernel(kernel);
+    }
 
+    // Print configuration - important for the evaluation report
     printf("\n[CONFIG] Image size    : %d x %d (%d pixels)\n", width, height, width * height);
     printf("[CONFIG] Kernel size   : %d x %d\n", KERNEL_SIZE, KERNEL_SIZE);
-    printf("[CONFIG] Kernel type   : Gaussian Blur\n");
+    printf("[CONFIG] Kernel type   : %s\n", get_kernel_name(kernel_type));
     printf("[CONFIG] Boundary      : Zero-padding\n\n");
 
-    /* =========== Perform Convolution with Timing =========== */
+    // This is what we're measuring - the actual convolution computation
     printf("[STATUS] Starting serial convolution...\n");
 
     double start_time = get_time_seconds();
-    convolve_serial(input_image, output_image, width, height, gaussian_kernel);
+    convolve_serial(input_image, output_image, width, height, kernel);
     double end_time = get_time_seconds();
 
     double elapsed_time = end_time - start_time;
-
     printf("[STATUS] Convolution complete.\n\n");
 
-    /* =========== Results =========== */
+    // Report performance metrics - these numbers matter for your evaluation
     printf("==================== RESULTS ====================\n");
     printf("  Image size       : %d x %d\n", width, height);
     printf("  Total pixels     : %d\n", width * height);
     printf("  Kernel size      : %d x %d\n", KERNEL_SIZE, KERNEL_SIZE);
+    printf("  Kernel type      : %s\n", get_kernel_name(kernel_type));
     printf("  Execution time   : %.6f seconds\n", elapsed_time);
     printf("  Throughput       : %.2f Mpixels/sec\n",
            (width * height) / (elapsed_time * 1e6));
     printf("=================================================\n\n");
 
-    /* Self-RMSE (should be 0.0) */
+    // Self-check - should always be 0.0
     double rmse = calculate_rmse(output_image, output_image, width, height);
     printf("[VERIFY] Self-RMSE     : %.6f (expected 0.0)\n", rmse);
 
-    /* Write output image */
-    if (write_pgm(output_filename, output_image, width, height, maxval) != 0)
-    {
+    // Write the output image
+    if (write_pgm(output_filename, output_image, width, height, maxval) != 0) {
         free(input_image);
         free(output_image);
         return EXIT_FAILURE;
     }
 
-    /* Save serial output for RMSE comparison with parallel versions */
+    // Save a reference copy so parallel versions can compare against it
     write_pgm("serial_output_reference.pgm", output_image, width, height, maxval);
     printf("[INFO] Reference output saved as 'serial_output_reference.pgm'\n");
 
-    /* Cleanup */
+    // Clean up memory
     free(input_image);
     free(output_image);
 

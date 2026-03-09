@@ -60,7 +60,7 @@ Write-Host "  [1 / 3]  SERIAL  -  Single-core baseline" -ForegroundColor Magenta
 Write-Host "  Each pixel is processed one after another on one CPU core." -ForegroundColor DarkGray
 Write-Host "-------------------------------------------------------------" -ForegroundColor DarkGray
 Set-Location "$BASE\Serial"
-.\serial_conv.exe input.pgm output_serial.pgm
+.\serial_conv.exe input.pgm output_serial.pgm blur
 Write-Host ""
 
 # ------------------------------------------------------------------
@@ -122,4 +122,38 @@ Write-Host "  Performance (1024 x 1024 image):" -ForegroundColor Yellow
 Write-Host "    OpenMP  ~2x speedup   |  MPI  ~3x speedup" -ForegroundColor White
 Write-Host ""
 Write-Host "  Output image: comparison_all.png  (already open)" -ForegroundColor Cyan
+Write-Host ""
+
+# ------------------------------------------------------------------
+# BONUS : Demonstrate all three kernel types
+#   Show evaluator what blur/sharpen/edge filters do to the image
+# ------------------------------------------------------------------
+Write-Host "=============================================================" -ForegroundColor Cyan
+Write-Host "  BONUS: Demonstrating All Kernel Types" -ForegroundColor Yellow
+Write-Host "=============================================================" -ForegroundColor Cyan
+Write-Host "  Running Serial implementation with three different filters..." -ForegroundColor White
+Write-Host ""
+
+Set-Location "$BASE\Serial"
+
+Write-Host "  [Blur]     Gaussian smoothing..." -ForegroundColor Magenta
+.\serial_conv.exe input.pgm output_blur.pgm blur
+
+Write-Host "  [Sharpen]  Edge enhancement..." -ForegroundColor Magenta
+.\serial_conv.exe input.pgm output_sharpen.pgm sharpen
+
+Write-Host "  [Edge]     Boundary detection..." -ForegroundColor Magenta
+.\serial_conv.exe input.pgm output_edge.pgm edge
+
+Write-Host ""
+Write-Host "  Creating kernel comparison image..." -ForegroundColor Yellow
+Set-Location $BASE
+python view_results.py --kernels
+
+Write-Host ""
+Write-Host "=============================================================" -ForegroundColor Cyan
+Write-Host "  Output images:" -ForegroundColor Green
+Write-Host "    comparison_all.png     - Implementation comparison" -ForegroundColor White
+Write-Host "    comparison_kernels.png - Filter effects comparison" -ForegroundColor White
+Write-Host "=============================================================" -ForegroundColor Cyan
 Write-Host ""
