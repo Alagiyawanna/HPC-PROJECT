@@ -26,6 +26,7 @@
 #include <string.h>
 #include <math.h>
 #include <cuda_runtime.h>
+#include <chrono>
 
 /* ========================= Configuration ========================= */
 
@@ -517,13 +518,12 @@ int main(int argc, char *argv[])
     /* =========== Serial Baseline =========== */
     printf("[STATUS] Running serial CPU baseline for comparison...\n");
 
-    struct timespec ts_start, ts_end;
-    clock_gettime(CLOCK_MONOTONIC, &ts_start);
+    auto ts_start = std::chrono::high_resolution_clock::now();
     convolve_serial(h_input, h_output_serial, width, height, h_kernel);
-    clock_gettime(CLOCK_MONOTONIC, &ts_end);
+    auto ts_end = std::chrono::high_resolution_clock::now();
 
-    double serial_time = (ts_end.tv_sec - ts_start.tv_sec) +
-                         (ts_end.tv_nsec - ts_start.tv_nsec) * 1e-9;
+    std::chrono::duration<double> diff = ts_end - ts_start;
+    double serial_time = diff.count();
     printf("[STATUS] Serial complete: %.6f seconds\n\n", serial_time);
 
     /* =========== Performance Analysis =========== */
