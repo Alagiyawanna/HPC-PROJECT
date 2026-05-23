@@ -31,27 +31,36 @@
 
 /* ========================= Configuration ========================= */
 
-#define KERNEL_SIZE 3
+#define KERNEL_SIZE 5
 #define KERNEL_RADIUS (KERNEL_SIZE / 2)
 
 /* Gaussian Blur 3x3 Kernel */
+/* Gaussian Blur 5x5 Kernel */
 static float gaussian_kernel[KERNEL_SIZE][KERNEL_SIZE] = {
-    {1.0f, 2.0f, 1.0f},
-    {2.0f, 4.0f, 2.0f},
-    {1.0f, 2.0f, 1.0f}};
+    {1.0f,  4.0f,  7.0f,  4.0f, 1.0f},
+    {4.0f, 16.0f, 26.0f, 16.0f, 4.0f},
+    {7.0f, 26.0f, 41.0f, 26.0f, 7.0f},
+    {4.0f, 16.0f, 26.0f, 16.0f, 4.0f},
+    {1.0f,  4.0f,  7.0f,  4.0f, 1.0f}
+};
 
-/* Sharpen 3x3 Kernel */
+/* Sharpen 5x5 Kernel (Padded outer edge to match KERNEL_SIZE dimensions) */
 static float sharpen_kernel[KERNEL_SIZE][KERNEL_SIZE] = {
-    {0.0f, -1.0f, 0.0f},
-    {-1.0f, 5.0f, -1.0f},
-    {0.0f, -1.0f, 0.0f}};
+    {0.0f,  0.0f,  0.0f,  0.0f, 0.0f},
+    {0.0f,  0.0f, -1.0f,  0.0f, 0.0f},
+    {0.0f, -1.0f,  5.0f, -1.0f, 0.0f},
+    {0.0f,  0.0f, -1.0f,  0.0f, 0.0f},
+    {0.0f,  0.0f,  0.0f,  0.0f, 0.0f}
+};
 
-/* Edge Detection (Laplacian) 3x3 Kernel */
+/* Edge Detection (Laplacian) 5x5 Kernel (Padded outer edge) */
 static float edge_kernel[KERNEL_SIZE][KERNEL_SIZE] = {
-    {-1.0f, -1.0f, -1.0f},
-    {-1.0f, 8.0f, -1.0f},
-    {-1.0f, -1.0f, -1.0f}};
-
+    {0.0f,  0.0f,  0.0f,  0.0f, 0.0f},
+    {0.0f, -1.0f, -1.0f, -1.0f, 0.0f},
+    {0.0f, -1.0f,  8.0f, -1.0f, 0.0f},
+    {0.0f, -1.0f, -1.0f, -1.0f, 0.0f},
+    {0.0f,  0.0f,  0.0f,  0.0f, 0.0f}
+};
 /* ========================= PGM Image I/O ========================= */
 
 unsigned char *read_pgm(const char *filename, int *width, int *height, int *maxval)
