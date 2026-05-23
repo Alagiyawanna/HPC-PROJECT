@@ -13,19 +13,9 @@
  * Compilation:
  *   gcc -O2 -o serial_conv serial_convolution.c -lm
  *
- * Usage:
- *   ./serial_conv <input.pgm> <output.pgm> [kernel_type]
- *   ./serial_conv --generate <width> <height> <output.pgm> [kernel_type]
- *
- *   kernel_type options:
- *     blur     - Gaussian Blur 3x3 (default, smooths the image)
- *     sharpen  - Sharpen 3x3 (enhances edges and details)
- *     edge     - Edge Detection 3x3 (Laplacian, highlights boundaries)
- *
- * Examples:
- *   ./serial_conv input.pgm output.pgm blur
- *   ./serial_conv --generate 1024 1024 test.pgm edge
- *
+ * Run:
+ *   ./serial_conv input.pgm output.pgm [kernel_type]
+
  * =============================================================================
  */
 
@@ -39,43 +29,12 @@
     #include <windows.h>  // For QueryPerformanceCounter on Windows
 #endif
 
-// Configuration - we define three different convolution filters that produce different effects
-#define KERNEL_SIZE 3 
-#define KERNEL_RADIUS (KERNEL_SIZE / 2) 
+// Configuration - blur uses a larger Gaussian kernel
+#define BLUR_KERNEL_SIZE 100
 
-// Kernel type enumeration - makes code more readable than using magic numbers
-typedef enum {
-    KERNEL_BLUR,
-    KERNEL_SHARPEN,
-    KERNEL_EDGE
-} KernelType;
-
-// Each kernel does something different to the image:
-
-// Gaussian Blur - smooths the image by averaging nearby pixels
-// Higher weight in center, lower on edges creates natural blur
-// We'll normalize this at runtime so all weights sum to 1
-static float gaussian_kernel[KERNEL_SIZE][KERNEL_SIZE] = {
-    {1.0f, 2.0f, 1.0f},
-    {2.0f, 4.0f, 2.0f},
-    {1.0f, 2.0f, 1.0f}
-};
-
-// Sharpen - makes edges crisper by emphasizing differences
-// Center is positive, neighbors are negative - enhances contrast
-static float sharpen_kernel[KERNEL_SIZE][KERNEL_SIZE] = {
-    { 0.0f, -1.0f,  0.0f},
-    {-1.0f,  5.0f, -1.0f},
-    { 0.0f, -1.0f,  0.0f}
-};
-
-// Edge Detection (Laplacian) - finds boundaries in the image
-// Highlights areas where pixel values change rapidly (edges)
-static float edge_kernel[KERNEL_SIZE][KERNEL_SIZE] = {
-    {-1.0f, -1.0f, -1.0f},
-    {-1.0f,  8.0f, -1.0f},
-    {-1.0f, -1.0f, -1.0f}
-};
+// Gaussian Blur - smooths the image by averaging nearby pixels.
+// This version uses a 100x100 kernel and is normalized at runtime.
+static float *gaussian_kernel = NULL;
 
 /* ========================= PGM Image I/O ========================= */
 
@@ -196,21 +155,34 @@ unsigned char *generate_test_image(int width, int height)
 
 // For blur kernels, we want the weights to sum to 1 so brightness doesn't change
 // For sharpen/edge, we keep them as-is (they sum to 1 or 0 already)
-void normalize_kernel(float kernel[KERNEL_SIZE][KERNEL_SIZE])
+void normalize_kernel(float *kernel, int kernel_size)
 {
     float sum = 0.0f;
-    for (int i = 0; i < KERNEL_SIZE; i++) {
-        for (int j = 0; j < KERNEL_SIZE; j++) {
-            sum += kernel[i][j];
-        }
+    int total = kernel_size * kernel_size;
+
+    for (int i = 0; i < total; i++) {
+        sum += kernel[i];
     }
 
     // Only normalize if sum is significantly non-zero (for blur)
-    if (fabs(sum) > 1e-6) {
-        for (int i = 0; i < KERNEL_SIZE; i++) {
-            for (int j = 0; j < KERNEL_SIZE; j++) {
-                kernel[i][j] /= sum;
-            }
+    if (fabs(sum) > 1e-6f) {
+        for (int i = 0; i < total; i++) {
+            kernel[i] /= sum;
+        }
+    }
+}
+
+void generate_gaussian_kernel(float *kernel, int kernel_size)
+{
+    const float center = (float)(kernel_size - 1) / 2.0f;
+    const float sigma = (float)kernel_size / 6.0f;
+    const float two_sigma_sq = 2.0f * sigma * sigma;
+
+    for (int i = 0; i < kernel_size; i++) {
+        for (int j = 0; j < kernel_size; j++) {
+            float di = (float)i - center;
+            float dj = (float)j - center;
+            kernel[i * kernel_size + j] = expf(-((di * di + dj * dj) / two_sigma_sq));
         }
     }
 }
@@ -219,23 +191,25 @@ void normalize_kernel(float kernel[KERNEL_SIZE][KERNEL_SIZE])
 // For each output pixel, we multiply neighbors by kernel weights and sum them
 void convolve_serial(const unsigned char *input, unsigned char *output,
                      int width, int height,
-                     float kernel[KERNEL_SIZE][KERNEL_SIZE])
+                     const float *kernel, int kernel_size)
 {
+    int kernel_radius = kernel_size / 2;
+
     // Loop through every pixel in the output image
     for (int row = 0; row < height; row++) {
         for (int col = 0; col < width; col++) {
             float sum = 0.0f;
 
-            // Apply the 3x3 kernel centered at this pixel
-            for (int ki = -KERNEL_RADIUS; ki <= KERNEL_RADIUS; ki++) {
-                for (int kj = -KERNEL_RADIUS; kj <= KERNEL_RADIUS; kj++) {
-                    int ni = row + ki; // neighbor row
-                    int nj = col + kj; // neighbor col
+            // Apply the kernel centered at this pixel.
+            for (int ki = 0; ki < kernel_size; ki++) {
+                for (int kj = 0; kj < kernel_size; kj++) {
+                    int ni = row + ki - kernel_radius; // neighbor row
+                    int nj = col + kj - kernel_radius; // neighbor col
 
                     // Zero-padding: pretend out-of-bounds pixels are black
                     if (ni >= 0 && ni < height && nj >= 0 && nj < width) {
                         sum += input[ni * width + nj] * 
-                               kernel[ki + KERNEL_RADIUS][kj + KERNEL_RADIUS];
+                               kernel[ki * kernel_size + kj];
                     }
                 }
             }
@@ -297,39 +271,9 @@ double get_time_seconds(void)
 
 /* ========================= Kernel Selection ========================= */
 
-// Parse the kernel name from command line and return the right kernel
-const char* get_kernel_name(KernelType type)
+const char* get_kernel_name(void)
 {
-    switch(type) {
-        case KERNEL_BLUR:    return "Gaussian Blur";
-        case KERNEL_SHARPEN: return "Sharpen";
-        case KERNEL_EDGE:    return "Edge Detection";
-        default:             return "Unknown";
-    }
-}
-
-KernelType parse_kernel_type(const char *str)
-{
-    if (!str || strcmp(str, "blur") == 0) {
-        return KERNEL_BLUR;  // default
-    } else if (strcmp(str, "sharpen") == 0) {
-        return KERNEL_SHARPEN;
-    } else if (strcmp(str, "edge") == 0) {
-        return KERNEL_EDGE;
-    } else {
-        fprintf(stderr, "Warning: Unknown kernel '%s', using blur\n", str);
-        return KERNEL_BLUR;
-    }
-}
-
-float (*get_kernel(KernelType type))[KERNEL_SIZE]
-{
-    switch(type) {
-        case KERNEL_BLUR:    return gaussian_kernel;
-        case KERNEL_SHARPEN: return sharpen_kernel;
-        case KERNEL_EDGE:    return edge_kernel;
-        default:             return gaussian_kernel;
-    }
+    return "Gaussian Blur";
 }
 
 /* ========================= Main Program ========================= */
@@ -337,15 +281,13 @@ float (*get_kernel(KernelType type))[KERNEL_SIZE]
 void print_usage(const char *prog)
 {
     printf("\nUsage:\n");
-    printf("  %s <input.pgm> <output.pgm> [kernel_type]\n", prog);
-    printf("  %s --generate <width> <height> <output.pgm> [kernel_type]\n\n", prog);
-    printf("Kernel types:\n");
-    printf("  blur     - Gaussian Blur (default, smooths image)\n");
-    printf("  sharpen  - Sharpen (enhances edges)\n");
-    printf("  edge     - Edge Detection (Laplacian)\n\n");
+    printf("  %s <input.pgm> <output.pgm>\n", prog);
+    printf("  %s --generate <width> <height> <output.pgm>\n\n", prog);
+    printf("Kernel:\n");
+    printf("  blur - Gaussian Blur %dx%d (default, smooths image)\n\n", BLUR_KERNEL_SIZE, BLUR_KERNEL_SIZE);
     printf("Examples:\n");
-    printf("  %s photo.pgm blurred.pgm blur\n", prog);
-    printf("  %s --generate 1024 1024 test.pgm edge\n\n", prog);
+    printf("  %s photo.pgm blurred.pgm\n", prog);
+    printf("  %s --generate 1024 1024 test.pgm\n\n", prog);
 }
 
 int main(int argc, char *argv[])
@@ -354,7 +296,8 @@ int main(int argc, char *argv[])
     unsigned char *output_image = NULL;
     int width, height, maxval = 255;
     const char *output_filename = NULL;
-    KernelType kernel_type = KERNEL_BLUR; // default
+    const float *kernel = NULL;
+    int kernel_size = BLUR_KERNEL_SIZE;
 
     printf("============================================\n");
     printf("  Serial Image Convolution (Baseline)\n");
@@ -362,19 +305,14 @@ int main(int argc, char *argv[])
     printf("============================================\n\n");
 
     // Parse command-line arguments - support multiple modes and kernel selection
-    if (argc >= 3 && argc <= 4) {
+    if (argc == 3) {
         // Mode 1: Read from file
         input_image = read_pgm(argv[1], &width, &height, &maxval);
         if (!input_image) return EXIT_FAILURE;
         
         output_filename = argv[2];
-        
-        // Optional kernel type
-        if (argc == 4) {
-            kernel_type = parse_kernel_type(argv[3]);
-        }
     }
-    else if (argc >= 5 && argc <= 6 && strcmp(argv[1], "--generate") == 0) {
+    else if (argc == 5 && strcmp(argv[1], "--generate") == 0) {
         // Mode 2: Generate test image
         width = atoi(argv[2]);
         height = atoi(argv[3]);
@@ -388,11 +326,6 @@ int main(int argc, char *argv[])
         if (!input_image) return EXIT_FAILURE;
         
         output_filename = argv[4];
-        
-        // Optional kernel type
-        if (argc == 6) {
-            kernel_type = parse_kernel_type(argv[5]);
-        }
 
         // Save the generated input for visual inspection
         write_pgm("serial_input.pgm", input_image, width, height, maxval);
@@ -410,23 +343,29 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    // Get the selected kernel and normalize it if needed (blur only)
-    float (*kernel)[KERNEL_SIZE] = get_kernel(kernel_type);
-    if (kernel_type == KERNEL_BLUR) {
-        normalize_kernel(kernel);
+    // Build and normalize the blur kernel.
+    kernel = (const float *)malloc((size_t)kernel_size * (size_t)kernel_size * sizeof(float));
+    if (!kernel) {
+        fprintf(stderr, "Error: Memory allocation failed for blur kernel\n");
+        free(input_image);
+        free(output_image);
+        return EXIT_FAILURE;
     }
+    gaussian_kernel = (float *)kernel;
+    generate_gaussian_kernel(gaussian_kernel, kernel_size);
+    normalize_kernel(gaussian_kernel, kernel_size);
 
     // Print configuration - important for the evaluation report
     printf("\n[CONFIG] Image size    : %d x %d (%d pixels)\n", width, height, width * height);
-    printf("[CONFIG] Kernel size   : %d x %d\n", KERNEL_SIZE, KERNEL_SIZE);
-    printf("[CONFIG] Kernel type   : %s\n", get_kernel_name(kernel_type));
+    printf("[CONFIG] Kernel size   : %d x %d\n", kernel_size, kernel_size);
+    printf("[CONFIG] Kernel type   : %s\n", get_kernel_name());
     printf("[CONFIG] Boundary      : Zero-padding\n\n");
 
     // This is what we're measuring - the actual convolution computation
     printf("[STATUS] Starting serial convolution...\n");
 
     double start_time = get_time_seconds();
-    convolve_serial(input_image, output_image, width, height, kernel);
+    convolve_serial(input_image, output_image, width, height, kernel, kernel_size);
     double end_time = get_time_seconds();
 
     double elapsed_time = end_time - start_time;
@@ -436,8 +375,8 @@ int main(int argc, char *argv[])
     printf("==================== RESULTS ====================\n");
     printf("  Image size       : %d x %d\n", width, height);
     printf("  Total pixels     : %d\n", width * height);
-    printf("  Kernel size      : %d x %d\n", KERNEL_SIZE, KERNEL_SIZE);
-    printf("  Kernel type      : %s\n", get_kernel_name(kernel_type));
+    printf("  Kernel size      : %d x %d\n", kernel_size, kernel_size);
+    printf("  Kernel type      : %s\n", get_kernel_name());
     printf("  Execution time   : %.6f seconds\n", elapsed_time);
     printf("  Throughput       : %.2f Mpixels/sec\n",
            (width * height) / (elapsed_time * 1e6));
@@ -461,6 +400,7 @@ int main(int argc, char *argv[])
     // Clean up memory
     free(input_image);
     free(output_image);
+    free((void *)kernel);
 
     printf("\n[DONE] Serial convolution completed successfully.\n");
     return EXIT_SUCCESS;

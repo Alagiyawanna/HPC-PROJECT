@@ -1,0 +1,11 @@
+convert .png ---> .pgm
+python convert.py
+
+compile
+nvcc -O2 -o cuda_conv.exe cuda_convolution.cu
+
+run
+cuda_conv.exe input.pgm output.pgm
+
+view image
+python view_image.py

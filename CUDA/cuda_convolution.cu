@@ -30,12 +30,12 @@
 
 /* ========================= Configuration ========================= */
 
-#define KERNEL_SIZE 3
+#define KERNEL_SIZE 101
 #define KERNEL_RADIUS (KERNEL_SIZE / 2)
 
-/* CUDA block dimensions */
-#define BLOCK_WIDTH 16
-#define BLOCK_HEIGHT 16
+/* CUDA block dimensions (reduced to fit shared memory for large kernels) */
+#define BLOCK_WIDTH 8
+#define BLOCK_HEIGHT 8
 
 /* Shared memory tile dimensions (block + halo on each side) */
 #define TILE_WIDTH (BLOCK_WIDTH + 2 * KERNEL_RADIUS)
@@ -325,6 +325,24 @@ void normalize_kernel(float kernel[KERNEL_SIZE][KERNEL_SIZE])
     }
 }
 
+/* Generate a 2D Gaussian kernel of size KERNEL_SIZE x KERNEL_SIZE */
+void generate_gaussian_kernel(float kernel[KERNEL_SIZE][KERNEL_SIZE])
+{
+    int center = KERNEL_RADIUS;
+    float sigma = (float)KERNEL_SIZE / 6.0f; /* cover +/-3 sigma */
+    float two_sigma_sq = 2.0f * sigma * sigma;
+
+    for (int i = 0; i < KERNEL_SIZE; i++)
+    {
+        for (int j = 0; j < KERNEL_SIZE; j++)
+        {
+            int di = i - center;
+            int dj = j - center;
+            kernel[i][j] = expf(-((float)(di * di + dj * dj) / two_sigma_sq));
+        }
+    }
+}
+
 /* RMSE calculation */
 double calculate_rmse(const unsigned char *img1, const unsigned char *img2,
                       int width, int height)
@@ -379,11 +397,8 @@ int main(int argc, char *argv[])
     int width, height, maxval = 255;
     const char *output_filename = NULL;
 
-    /* Gaussian Blur 3x3 Kernel */
-    float h_kernel[KERNEL_SIZE][KERNEL_SIZE] = {
-        {1.0f, 2.0f, 1.0f},
-        {2.0f, 4.0f, 2.0f},
-        {1.0f, 2.0f, 1.0f}};
+    /* Gaussian Blur kernel (generated at runtime to match KERNEL_SIZE) */
+    float h_kernel[KERNEL_SIZE][KERNEL_SIZE];
 
     printf("============================================\n");
     printf("  CUDA Image Convolution (CPU + GPU Hybrid)\n");
@@ -432,7 +447,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    /* Normalize kernel */
+    /* Generate and normalize kernel */
+    generate_gaussian_kernel(h_kernel);
     normalize_kernel(h_kernel);
 
     printf("[CONFIG] Image size    : %d x %d (%d pixels)\n", width, height, img_size);

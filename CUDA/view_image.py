@@ -13,7 +13,7 @@ def read_pgm(filename):
         data = np.frombuffer(f.read(width * height), dtype=np.uint8)
         return data.reshape((height, width)), maxval
 
-img, _ = read_pgm('output_custom.pgm') 
+img, _ = read_pgm('output.pgm') 
 
 # Display the image 
 plt.figure(figsize=(8, 8))  
